@@ -11,7 +11,10 @@ NB: This is a synchronous implementation.
 from concurrent.futures import ThreadPoolExecutor
 from os.path import exists
 from pathlib import *
+import os
 import threading
+import tempfile
+import shutil
 # Third-Party
 import requests
 
@@ -258,13 +261,34 @@ def download(path, where_to_save) -> bool :
     """
     # Parse arguments
     url = __PREFIX + 'path' + path + '?action=content'
-    rq = SESSION.get(url, headers=__headers, stream=True)
-    if rq.status_code != 200:
+    tmp_path = None
+    try:
+        with SESSION.get(url, headers=__headers, stream=True) as rq:
+            if rq.status_code != 200:
+                return False
+
+            dest = Path(where_to_save)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=dest.parent, prefix=f".{dest.name}.", suffix=".part", delete=False) as tmp:
+                tmp_path = tmp.name
+                shutil.copyfileobj(rq.raw, tmp)
+                content_length = rq.headers.get("Content-Length")
+                if content_length is not None:
+                    expected = int(content_length)
+                    if tmp.tell() != expected:
+                        return False
+
+                os.replace(tmp.name, dest)
+                tmp_path = None
+            return True
+    except Exception:
         return False
-    else:
-        with open(where_to_save, 'wb') as out_file:
-            out_file.write(rq.content)
-        return True
+    finally:
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 # Methods for parallel downloads
     
@@ -280,17 +304,37 @@ def download_thread(file: tuple) -> tuple :
     # Parameters
     path, where_to_save = map(str, file)
     # URL for request
-    url = __PREFIX + 'path' + str(path) + '?action=content'
+    url = __PREFIX + 'path' + path + '?action=content'
     # Parallel download
-    with (thread_local.session.get(url, headers=__headers, stream=True) as rq,
-          open(where_to_save, 'wb') as out_file):
-        # TODO: manage HTTP return code
-        if rq.status_code != 200:
-            return file, False
-        else:
-            with open(where_to_save, 'wb') as out_file:
-                out_file.write(rq.content)
+    tmp_path = None
+    try:
+        with thread_local.session.get(url, headers=__headers, stream=True) as rq:
+            # TODO: manage HTTP return code
+            if rq.status_code != 200:
+                return file, False
+
+            dest = Path(where_to_save)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=dest.parent, prefix=f".{dest.name}.", suffix=".part", delete=False) as tmp:
+                tmp_path = tmp.name
+                shutil.copyfileobj(rq.raw, tmp)
+                content_length = rq.headers.get("Content-Length")
+                if content_length is not None:
+                    expected = int(content_length)
+                    if tmp.tell() != expected:
+                        return file, False
+
+                os.replace(tmp.name, dest)
+                tmp_path = None
             return file, True
+    except Exception:
+        return file, False
+    finally:
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
         
 def download_parallel(files):
     """
